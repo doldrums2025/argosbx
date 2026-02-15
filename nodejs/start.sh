@@ -47,6 +47,46 @@ v6=$( (command -v curl >/dev/null 2>&1 && curl -s6m5 -k "$v46url" 2>/dev/null) |
 v4dq=$( (command -v curl >/dev/null 2>&1 && curl -s4m5 -k https://ip.fm | sed -E 's/.*Location: ([^,]+(, [^,]+)*),.*/\1/' 2>/dev/null) || (command -v wget >/dev/null 2>&1 && timeout 3 wget -4 --tries=2 -qO- https://ip.fm | grep '<span class="has-text-grey-light">Location:' | tail -n1 | sed -E 's/.*>Location: <\/span>([^<]+)<.*/\1/' 2>/dev/null) )
 v6dq=$( (command -v curl >/dev/null 2>&1 && curl -s6m5 -k https://ip.fm | sed -E 's/.*Location: ([^,]+(, [^,]+)*),.*/\1/' 2>/dev/null) || (command -v wget >/dev/null 2>&1 && timeout 3 wget -6 --tries=2 -qO- https://ip.fm | grep '<span class="has-text-grey-light">Location:' | tail -n1 | sed -E 's/.*>Location: <\/span>([^<]+)<.*/\1/' 2>/dev/null) )
 }
+# [安全修复] WARP 密钥注册
+register_warp(){
+if [ -f "$HOME/agsbx/warp_account.json" ]; then
+  warp_privkey=$(cat "$HOME/agsbx/warp_privkey")
+  warp_reserved=$(cat "$HOME/agsbx/warp_reserved")
+  return 0
+fi
+echo "正在注册 WARP 账户获取独立密钥……"
+if command -v wg >/dev/null 2>&1; then
+  warp_privkey=$(wg genkey)
+  warp_pubkey=$(echo "$warp_privkey" | wg pubkey)
+elif [ -e "$HOME/agsbx/sing-box" ]; then
+  warp_privkey=$("$HOME/agsbx/sing-box" generate wg-keypair 2>/dev/null | grep PrivateKey | awk '{print $2}')
+  warp_pubkey=$("$HOME/agsbx/sing-box" generate wg-keypair 2>/dev/null | grep PublicKey | awk '{print $2}')
+fi
+if [ -z "$warp_privkey" ]; then
+  warp_privkey="COAYqKrAXaQIGL8+Wkmfe39r1tMMR80JWHVaF443XFQ="
+  warp_reserved="134, 63, 85"
+  return 0
+fi
+warp_reg=$(curl -sX POST "https://api.cloudflareclient.com/v0a2158/reg" \
+  -H "Content-Type: application/json" \
+  -d "{\"key\":\"$warp_pubkey\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>/dev/null)
+if echo "$warp_reg" | grep -q '"id"'; then
+  echo "$warp_reg" > "$HOME/agsbx/warp_account.json"
+  echo "$warp_privkey" > "$HOME/agsbx/warp_privkey"
+  client_id=$(echo "$warp_reg" | grep -o '"client_id":"[^"]*"' | cut -d'"' -f4)
+  if [ -n "$client_id" ]; then
+    reserved=$(echo "$client_id" | base64 -d 2>/dev/null | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//' | tr ' ' ',')
+    warp_reserved="$reserved"
+  else
+    warp_reserved="0, 0, 0"
+  fi
+  echo "$warp_reserved" > "$HOME/agsbx/warp_reserved"
+else
+  warp_privkey="COAYqKrAXaQIGL8+Wkmfe39r1tMMR80JWHVaF443XFQ="
+  warp_reserved="134, 63, 85"
+fi
+}
+
 warpsx(){
 if [ -n "$name" ]; then
 sxname=$name-
@@ -321,9 +361,10 @@ EOF
 insuuid
 command -v openssl >/dev/null 2>&1 && openssl ecparam -genkey -name prime256v1 -out "$HOME/agsbx/private.key" >/dev/null 2>&1
 command -v openssl >/dev/null 2>&1 && openssl req -new -x509 -days 36500 -key "$HOME/agsbx/private.key" -out "$HOME/agsbx/cert.pem" -subj "/CN=www.bing.com" >/dev/null 2>&1
+# [安全修复] 不从远程下载预编译证书
 if [ ! -f "$HOME/agsbx/private.key" ]; then
-url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/private.key"; out="$HOME/agsbx/private.key"; (command -v curl>/dev/null 2>&1 && curl -Ls -o "$out" --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -q -O "$out" --tries=2 "$url")
-url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/cert.pem"; out="$HOME/agsbx/cert.pem"; (command -v curl>/dev/null 2>&1 && curl -Ls -o "$out" --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -q -O "$out" --tries=2 "$url")
+echo "错误：openssl 未安装，无法生成TLS证书。请先安装 openssl"
+exit 1
 fi
 if [ -n "$hypt" ]; then
 if [ -z "$port_hy2" ] && [ ! -e "$HOME/agsbx/port_hy2" ]; then
@@ -622,6 +663,7 @@ fi
 }
 
 xrsbout(){
+register_warp
 if [ -e "$HOME/agsbx/xr.json" ]; then
 sed -i '${s/,\s*$//}' "$HOME/agsbx/xr.json"
 cat >> "$HOME/agsbx/xr.json" <<EOF
@@ -638,7 +680,7 @@ cat >> "$HOME/agsbx/xr.json" <<EOF
       "tag": "x-warp-out",
       "protocol": "wireguard",
       "settings": {
-        "secretKey": "COAYqKrAXaQIGL8+Wkmfe39r1tMMR80JWHVaF443XFQ=",
+        "secretKey": "${warp_privkey}",
         "address": [
           "172.16.0.2/32",
           "2606:4700:110:8eb1:3b27:e65e:3645:97b0/128"
@@ -653,7 +695,7 @@ cat >> "$HOME/agsbx/xr.json" <<EOF
             "endpoint": "${xendip}:2408"
           }
         ],
-        "reserved": [134, 63, 85]
+        "reserved": [${warp_reserved}]
         }
     },
     {
@@ -743,7 +785,7 @@ cat >> "$HOME/agsbx/sb.json" <<EOF
         "172.16.0.2/32",
         "2606:4700:110:8eb1:3b27:e65e:3645:97b0/128"
       ],
-      "private_key": "COAYqKrAXaQIGL8+Wkmfe39r1tMMR80JWHVaF443XFQ=",
+      "private_key": "${warp_privkey}",
       "peers": [
         {
           "address": "${sendip}",
@@ -753,7 +795,7 @@ cat >> "$HOME/agsbx/sb.json" <<EOF
             "0.0.0.0/0",
             "::/0"
           ],
-          "reserved": [134, 63, 85]
+          "reserved": [${warp_reserved}]
         }
       ]
     }

@@ -74,6 +74,56 @@ v6=$( (command -v curl >/dev/null 2>&1 && curl -s6m5 -k "$v46url" 2>/dev/null) |
 v4dq=$( (command -v curl >/dev/null 2>&1 && curl -s4m5 -k https://ip.fm | sed -E 's/.*Location: ([^,]+(, [^,]+)*),.*/\1/' 2>/dev/null) || (command -v wget >/dev/null 2>&1 && timeout 3 wget -4 --tries=2 -qO- https://ip.fm | grep '<span class="has-text-grey-light">Location:' | tail -n1 | sed -E 's/.*>Location: <\/span>([^<]+)<.*/\1/' 2>/dev/null) )
 v6dq=$( (command -v curl >/dev/null 2>&1 && curl -s6m5 -k https://ip.fm | sed -E 's/.*Location: ([^,]+(, [^,]+)*),.*/\1/' 2>/dev/null) || (command -v wget >/dev/null 2>&1 && timeout 3 wget -6 --tries=2 -qO- https://ip.fm | grep '<span class="has-text-grey-light">Location:' | tail -n1 | sed -E 's/.*>Location: <\/span>([^<]+)<.*/\1/' 2>/dev/null) )
 }
+# [安全修复] WARP 密钥注册 - 每个用户获取自己的身份
+register_warp(){
+if [ -f "$HOME/agsbx/warp_account.json" ]; then
+  warp_privkey=$(cat "$HOME/agsbx/warp_privkey")
+  warp_reserved=$(cat "$HOME/agsbx/warp_reserved")
+  return 0
+fi
+echo "正在注册 WARP 账户获取独立密钥……"
+# 生成 WireGuard 密钥对
+if command -v wg >/dev/null 2>&1; then
+  warp_privkey=$(wg genkey)
+  warp_pubkey=$(echo "$warp_privkey" | wg pubkey)
+else
+  # 用 sing-box 或 xray 的内置能力 (如果可用)
+  if [ -e "$HOME/agsbx/sing-box" ]; then
+    warp_privkey=$("$HOME/agsbx/sing-box" generate wg-keypair 2>/dev/null | grep PrivateKey | awk '{print $2}')
+    warp_pubkey=$("$HOME/agsbx/sing-box" generate wg-keypair 2>/dev/null | grep PublicKey | awk '{print $2}')
+  fi
+  if [ -z "$warp_privkey" ]; then
+    echo "警告：无法生成 WireGuard 密钥（需安装 wireguard-tools 或确保 sing-box 可用）"
+    echo "回退使用公共密钥（不推荐）"
+    warp_privkey="COAYqKrAXaQIGL8+Wkmfe39r1tMMR80JWHVaF443XFQ="
+    warp_reserved="134, 63, 85"
+    return 0
+  fi
+fi
+# 调用 Cloudflare WARP API 注册
+warp_reg=$(curl -sX POST "https://api.cloudflareclient.com/v0a2158/reg" \
+  -H "Content-Type: application/json" \
+  -d "{\"key\":\"$warp_pubkey\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>/dev/null)
+if echo "$warp_reg" | grep -q '"id"'; then
+  echo "$warp_reg" > "$HOME/agsbx/warp_account.json"
+  echo "$warp_privkey" > "$HOME/agsbx/warp_privkey"
+  # 提取 client_id 并转为 reserved 数组
+  client_id=$(echo "$warp_reg" | grep -o '"client_id":"[^"]*"' | cut -d'"' -f4)
+  if [ -n "$client_id" ]; then
+    reserved=$(echo "$client_id" | base64 -d 2>/dev/null | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//' | tr ' ' ',')
+    warp_reserved="$reserved"
+  else
+    warp_reserved="0, 0, 0"
+  fi
+  echo "$warp_reserved" > "$HOME/agsbx/warp_reserved"
+  echo "WARP 注册成功，已保存独立密钥"
+else
+  echo "WARP 注册失败，回退使用公共密钥"
+  warp_privkey="COAYqKrAXaQIGL8+Wkmfe39r1tMMR80JWHVaF443XFQ="
+  warp_reserved="134, 63, 85"
+fi
+}
+
 warpsx(){
 if [ -n "$name" ]; then
 sxname=$name-
@@ -357,9 +407,12 @@ EOF
 insuuid
 command -v openssl >/dev/null 2>&1 && openssl ecparam -genkey -name prime256v1 -out "$HOME/agsbx/private.key" >/dev/null 2>&1
 command -v openssl >/dev/null 2>&1 && openssl req -new -x509 -days 36500 -key "$HOME/agsbx/private.key" -out "$HOME/agsbx/cert.pem" -subj "/CN=www.bing.com" >/dev/null 2>&1
+# [安全修复] 不从远程下载预编译证书，必须本地生成
 if [ ! -f "$HOME/agsbx/private.key" ]; then
-url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/private.key"; out="$HOME/agsbx/private.key"; (command -v curl>/dev/null 2>&1 && curl -Ls -o "$out" --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -q -O "$out" --tries=2 "$url")
-url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/cert.pem"; out="$HOME/agsbx/cert.pem"; (command -v curl>/dev/null 2>&1 && curl -Ls -o "$out" --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -q -O "$out" --tries=2 "$url")
+echo "错误：openssl 未安装，无法生成TLS证书。请先安装 openssl"
+echo "  Debian/Ubuntu: apt install -y openssl"
+echo "  Alpine: apk add openssl"
+exit 1
 fi
 if [ -n "$hyp" ]; then
 hyp=hypt
@@ -679,6 +732,7 @@ fi
 }
 
 xrsbout(){
+register_warp
 if [ -e "$HOME/agsbx/xr.json" ]; then
 sed -i '${s/,\s*$//}' "$HOME/agsbx/xr.json"
 cat >> "$HOME/agsbx/xr.json" <<EOF
@@ -695,7 +749,7 @@ cat >> "$HOME/agsbx/xr.json" <<EOF
       "tag": "x-warp-out",
       "protocol": "wireguard",
       "settings": {
-        "secretKey": "COAYqKrAXaQIGL8+Wkmfe39r1tMMR80JWHVaF443XFQ=",
+        "secretKey": "${warp_privkey}",
         "address": [
           "172.16.0.2/32",
           "2606:4700:110:8eb1:3b27:e65e:3645:97b0/128"
@@ -710,7 +764,7 @@ cat >> "$HOME/agsbx/xr.json" <<EOF
             "endpoint": "${xendip}:2408"
           }
         ],
-        "reserved": [134, 63, 85]
+        "reserved": [${warp_reserved}]
         }
     },
     {
@@ -800,7 +854,7 @@ cat >> "$HOME/agsbx/sb.json" <<EOF
         "172.16.0.2/32",
         "2606:4700:110:8eb1:3b27:e65e:3645:97b0/128"
       ],
-      "private_key": "COAYqKrAXaQIGL8+Wkmfe39r1tMMR80JWHVaF443XFQ=",
+      "private_key": "${warp_privkey}",
       "peers": [
         {
           "address": "${sendip}",
@@ -810,7 +864,7 @@ cat >> "$HOME/agsbx/sb.json" <<EOF
             "0.0.0.0/0",
             "::/0"
           ],
-          "reserved": [134, 63, 85]
+          "reserved": [${warp_reserved}]
         }
       ]
     }
@@ -980,8 +1034,10 @@ SCRIPT_PATH="$HOME/bin/agsbx"
 mkdir -p "$HOME/bin"
 (command -v curl >/dev/null 2>&1 && curl -sL "$agsbxurl" -o "$SCRIPT_PATH") || (command -v wget >/dev/null 2>&1 && wget -qO "$SCRIPT_PATH" "$agsbxurl")
 chmod +x "$SCRIPT_PATH"
+# [安全修复] 不再将敏感变量(UUID/Argo Token等)写入 ~/.bashrc
+# 非systemd环境下的自动恢复改为通过 crontab @reboot 实现（已在下方配置）
 if ! pidof systemd >/dev/null 2>&1 && ! command -v rc-service >/dev/null 2>&1; then
-echo "if ! find /proc/*/exe -type l 2>/dev/null | grep -E '/proc/[0-9]+/exe' | xargs -r readlink 2>/dev/null | grep -Eq 'agsbx/(s|x)' && ! pgrep -f 'agsbx/(s|x)' >/dev/null 2>&1; then echo '检测到系统可能中断过，或者变量格式错误？建议在SSH对话框输入 reboot 重启下服务器。现在自动执行Argosbx脚本的节点恢复操作，请稍等……'; sleep 6; export cdnym=\"${cdnym}\" name=\"${name}\" ippz=\"${ippz}\" argo=\"${argo}\" uuid=\"${uuid}\" $wap=\"${warp}\" $xhp=\"${port_xh}\" $vxp=\"${port_vx}\" $ssp=\"${port_ss}\" $sop=\"${port_so}\" $anp=\"${port_an}\" $arp=\"${port_ar}\" $vlp=\"${port_vl_re}\" $vmp=\"${port_vm_ws}\" $hyp=\"${port_hy2}\" $tup=\"${port_tu}\" reym=\"${ym_vl_re}\" agn=\"${ARGO_DOMAIN}\" agk=\"${ARGO_AUTH}\"; bash "$HOME/bin/agsbx"; fi" >> ~/.bashrc
+echo "注意：非systemd环境，服务重启依赖 crontab @reboot，请确保 cron 服务正常"
 fi
 sed -i '/export PATH="\$HOME\/bin:\$PATH"/d' ~/.bashrc
 echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.bashrc"
@@ -1367,12 +1423,9 @@ v4orv6
 echo "VPS系统：$op"
 echo "CPU架构：$cpu"
 echo "Argosbx脚本未安装，开始安装…………" && sleep 2
-setenforce 0 >/dev/null 2>&1
-iptables -P INPUT ACCEPT >/dev/null 2>&1
-iptables -P FORWARD ACCEPT >/dev/null 2>&1
-iptables -P OUTPUT ACCEPT >/dev/null 2>&1
-iptables -F >/dev/null 2>&1
-netfilter-persistent save >/dev/null 2>&1
+# [安全修复] 不再清空防火墙和关闭SELinux，请手动放行所需端口
+# 如需放行端口示例: iptables -A INPUT -p tcp --dport <PORT> -j ACCEPT
+# 或: ufw allow <PORT>/tcp
 ins
 cip
 echo
