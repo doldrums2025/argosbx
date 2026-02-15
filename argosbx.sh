@@ -38,7 +38,7 @@ export ippz=${ippz:-''}
 export warp=${warp:-''}
 export name=${name:-''}
 v46url="https://icanhazip.com"
-agsbxurl="https://raw.githubusercontent.com/yonggekkk/argosbx/main/argosbx.sh"
+agsbxurl="https://raw.githubusercontent.com/doldrums2025/argosbx/main/argosbx.sh"
 showmode(){
 echo "Argosbx脚本一键SSH命令生器在线网址：https://yonggekkk.github.io/argosbx/"
 echo "主脚本：bash <(curl -Ls https://raw.githubusercontent.com/yonggekkk/argosbx/main/argosbx.sh) 或 bash <(wget -qO- https://raw.githubusercontent.com/yonggekkk/argosbx/main/argosbx.sh)"
@@ -190,11 +190,41 @@ installxray(){
 echo
 echo "=========启用xray内核========="
 mkdir -p "$HOME/agsbx/xrk"
+# [安全修复] 从 Xray 官方 GitHub releases 下载
 if [ ! -e "$HOME/agsbx/xray" ]; then
-url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/xray-$cpu"; out="$HOME/agsbx/xray"; (command -v curl >/dev/null 2>&1 && curl -Lo "$out" -# --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -O "$out" --tries=2 "$url")
+xray_ver=$(curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+[ -z "$xray_ver" ] && xray_ver="v26.2.6"
+case "$cpu" in
+  amd64) xray_zip="Xray-linux-64.zip" ;;
+  arm64) xray_zip="Xray-linux-arm64-v8a.zip" ;;
+esac
+xray_url="https://github.com/XTLS/Xray-core/releases/download/${xray_ver}/${xray_zip}"
+xray_dgst_url="${xray_url}.dgst"
+echo "从官方下载 Xray ${xray_ver} ..."
+tmpxray="/tmp/xray_download.zip"
+(command -v curl >/dev/null 2>&1 && curl -Lo "$tmpxray" -# --retry 2 "$xray_url") || (command -v wget >/dev/null 2>&1 && wget -O "$tmpxray" --tries=2 "$xray_url")
+# 校验 SHA256
+dgst_content=$( (command -v curl >/dev/null 2>&1 && curl -sL "$xray_dgst_url") || (command -v wget >/dev/null 2>&1 && wget -qO- "$xray_dgst_url") )
+expected_sha256=$(echo "$dgst_content" | grep -i 'sha256' | head -1 | awk '{print $NF}')
+if [ -n "$expected_sha256" ]; then
+  actual_sha256=$(sha256sum "$tmpxray" 2>/dev/null | awk '{print $1}')
+  [ -z "$actual_sha256" ] && actual_sha256=$(shasum -a 256 "$tmpxray" 2>/dev/null | awk '{print $1}')
+  if [ "$expected_sha256" = "$actual_sha256" ]; then
+    echo "SHA256 校验通过 ✅"
+  else
+    echo "SHA256 校验失败 ❌ (期望: $expected_sha256, 实际: $actual_sha256)"
+    echo "下载可能被篡改，中止安装"
+    rm -f "$tmpxray"
+    exit 1
+  fi
+else
+  echo "警告：无法获取校验文件，跳过校验"
+fi
+unzip -o "$tmpxray" xray -d "$HOME/agsbx/" >/dev/null 2>&1
+rm -f "$tmpxray"
 chmod +x "$HOME/agsbx/xray"
 sbcore=$("$HOME/agsbx/xray" version 2>/dev/null | awk '/^Xray/{print $2}')
-echo "已安装Xray正式版内核：$sbcore"
+echo "已安装Xray官方正式版内核：$sbcore"
 fi
 cat > "$HOME/agsbx/xr.json" <<EOF
 {
@@ -389,11 +419,39 @@ fi
 installsb(){
 echo
 echo "=========启用Sing-box内核========="
+# [安全修复] 从 Sing-box 官方 GitHub releases 下载
 if [ ! -e "$HOME/agsbx/sing-box" ]; then
-url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/sing-box-$cpu"; out="$HOME/agsbx/sing-box"; (command -v curl>/dev/null 2>&1 && curl -Lo "$out" -# --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -O "$out" --tries=2 "$url")
+sb_ver=$(curl -sL https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+[ -z "$sb_ver" ] && sb_ver="v1.12.21"
+sb_ver_num="${sb_ver#v}"
+sb_tar="sing-box-${sb_ver_num}-linux-${cpu}.tar.gz"
+sb_url="https://github.com/SagerNet/sing-box/releases/download/${sb_ver}/${sb_tar}"
+echo "从官方下载 Sing-box ${sb_ver} ..."
+tmpsb="/tmp/singbox_download.tar.gz"
+(command -v curl >/dev/null 2>&1 && curl -Lo "$tmpsb" -# --retry 2 "$sb_url") || (command -v wget >/dev/null 2>&1 && wget -O "$tmpsb" --tries=2 "$sb_url")
+# 从 checksums.txt 校验
+sb_checksum_url="https://github.com/SagerNet/sing-box/releases/download/${sb_ver}/sing-box-${sb_ver_num}-checksums.txt"
+sb_checksums=$( (command -v curl >/dev/null 2>&1 && curl -sL "$sb_checksum_url") || (command -v wget >/dev/null 2>&1 && wget -qO- "$sb_checksum_url") )
+expected_sha=$(echo "$sb_checksums" | grep "$sb_tar" | awk '{print $1}')
+if [ -n "$expected_sha" ]; then
+  actual_sha=$(sha256sum "$tmpsb" 2>/dev/null | awk '{print $1}')
+  [ -z "$actual_sha" ] && actual_sha=$(shasum -a 256 "$tmpsb" 2>/dev/null | awk '{print $1}')
+  if [ "$expected_sha" = "$actual_sha" ]; then
+    echo "SHA256 校验通过 ✅"
+  else
+    echo "SHA256 校验失败 ❌"
+    rm -f "$tmpsb"
+    exit 1
+  fi
+else
+  echo "警告：无法获取校验文件，跳过校验"
+fi
+tar -xzf "$tmpsb" -C /tmp/ >/dev/null 2>&1
+cp "/tmp/sing-box-${sb_ver_num}-linux-${cpu}/sing-box" "$HOME/agsbx/sing-box"
+rm -rf "$tmpsb" "/tmp/sing-box-${sb_ver_num}-linux-${cpu}"
 chmod +x "$HOME/agsbx/sing-box"
 sbcore=$("$HOME/agsbx/sing-box" version 2>/dev/null | awk '/version/{print $NF}')
-echo "已安装Sing-box正式版内核：$sbcore"
+echo "已安装Sing-box官方正式版内核：$sbcore"
 fi
 cat > "$HOME/agsbx/sb.json" <<EOF
 {
